@@ -129,18 +129,23 @@ S3 (relatorios-campo / s3:ObjectCreated:*)
    └──► AWS Lambda (triagem / app.py - Python 3.12, timeout 120s)
            ├──► Amazon Bedrock Runtime (converse -> Ollama / llama3.2)
            └──► Amazon DynamoDB (tabela triagem)
+```
 
-### 2. Comandos para atualizar o `.gitignore` e enviar para o GitHub
+* **Gatilho S3 (`relatorios-campo`):** Configurado via `put-bucket-notification-configuration` para disparar a função Lambda `triagem` automaticamente a cada novo arquivo enviado.
+* **Função Lambda (`app.py`):** Lê o texto do relatório no S3, envia um prompt de sistema exigindo saída estritamente em JSON (`{"resumo": str, "urgencia": "baixa|media|alta"}`) para o Bedrock Runtime (`anthropic.claude-3-haiku-20240307-v1:0`, mapeado localmente para o `llama3.2` no Ollama) com `temperature=0` e `maxTokens=300`.
+* **Tratamento de Resposta Inválida (Desafio Extra):** Implementado bloco `try/except` com limpeza de blocos Markdown e validação dos campos obrigatórios (`resumo` e `urgencia`). Caso o modelo pequeno retorne texto fora do formato JSON esperado, o item é registrado com `"urgencia": "revisao_humana"` em vez de gerar falha na execução da Lambda.
+* **Menor Privilégio IAM:** A role `triagem-lambda` recebeu uma política inline (`triagem-minimo`) concedendo apenas `s3:GetObject` no bucket `relatorios-campo`, `bedrock:InvokeModel` no modelo alvo, `dynamodb:PutItem` na tabela `triagem` e permissões de escrita no CloudWatch Logs.
 
-Adicione `*.zip` ao `.gitignore` (para não versionar o pacote binário `funcao.zip`, mantendo apenas o código-fonte `app.py`, as políticas e os relatórios de teste) e faça o `commit` e `push`:
+### 2. Resultados Obtidos no Teste (`aws dynamodb scan --table-name triagem`)
 
-```powershell
-# Garante que arquivos .zip não subam para o repositório
-if (-not (Select-String -Path .gitignore -Pattern "\*\.zip" -Quiet)) {
-    Add-Content -Path .gitignore -Value "`n*.zip"
-}
+| Arquivo | Resumo gerado pelo modelo | Urgência | `tokens_in` | `tokens_out` |
+|---|---|---|---|---|
+| `relatorio1.txt` | Solo com umidade adequada e desenvolvimento vegetativo normal | `baixa` | 108 | 27 |
+| `relatorio2.txt` | Infestação de lagarta-do-cartucho em 12% das plantas | `alta` | 122 | 31 |
+| `relatorio3.txt` | Falta de irrigação em 40% das árvores de citros | `alta` | 131 | 30 |
 
-git status
-git add app.py notificacao.json triagem-lambda-policy.json relatorio1.txt relatorio2.txt relatorio3.txt README.md .gitignore
-git commit -m "Conclui Etapa 4: automacao orientada a eventos S3 -> Lambda -> Bedrock -> DynamoDB"
-git push
+* **Análise crítica do modelo local:** O modelo `llama3.2` (3B) seguiu rigorosamente o esquema JSON em todas as execuções sem precisar acionar o fallback de revisão humana. Porém, demonstrou comportamento conservador na calibração de severidade, classificando o `relatorio2.txt` (infestação inicial de 12% com recomendação preventiva) como `alta` em vez de `media`.
+
+### 3. Diferenças no Floci vs. AWS Real
+* **Injeção de Endpoint e Runtime:** O Floci executa a Lambda em um container Docker real e injeta automaticamente `AWS_ENDPOINT_URL`, permitindo que o `app.py` use `boto3.client("s3")` e `boto3.client("bedrock-runtime")` sem URLs fixas no código — idêntico ao código de produção na AWS.
+* **Timeout e Latência:** Como a inferência roda localmente em CPU/RAM via Ollama, foi necessário elevar o `--timeout` da Lambda de 3 s (padrão) para `120` s. Na AWS real, o mesmo `app.py` rodaria sem alterações de código, trocando apenas o `modelId` para um modelo gerenciado habilitado na conta e contabilizando o custo real por token processado.
