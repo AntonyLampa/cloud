@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VPC, sub-redes, servidor web EC2, bucket S3 e tabela DynamoDB auditados (Etapa 3).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: lab-genai-aws
+    Description: Nome do projeto para alocacao de custos
+
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-2023/x86_64/standard/latest
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: iac-vpc
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: iac-public-subnet
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: iac-private-subnet
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: iac-igw
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: iac-public-rt
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP access only (port 80)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: iac-web-sg
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          dnf update -y
+          dnf install -y nginx
+          systemctl enable --now nginx
+          echo "<h1>Servidor Web IaC - Lab GenAI AWS</h1>" > /usr/share/nginx/html/index.html
+      Tags:
+        - Key: Name
+          Value: iac-web-instance
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  RelatoriosBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: relatorios-campo-iac
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  TriagemTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: triagem-iac
+      AttributeDefinitions:
+        - AttributeName: arquivo
+          AttributeType: S
+      KeySchema:
+        - AttributeName: arquivo
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+Outputs:
+  VpcId:
+    Description: ID da VPC criada
+    Value: !Ref VPC
+
+  PublicSubnetId:
+    Description: ID da sub-rede publica
+    Value: !Ref PublicSubnet
+
+  PrivateSubnetId:
+    Description: ID da sub-rede privada
+    Value: !Ref PrivateSubnet
+
+  InstanceId:
+    Description: ID da instancia EC2
+    Value: !Ref EC2Instance
+
+  InstancePublicIp:
+    Description: IP publico da instancia EC2 web
+    Value: !GetAtt EC2Instance.PublicIp
+
+  BucketName:
+    Description: Nome do bucket S3
+    Value: !Ref RelatoriosBucket
+
+  DynamoDbTableName:
+    Description: Nome da tabela DynamoDB
+    Value: !Ref TriagemTable
+
+  DynamoDbTableArn:
+    Description: ARN da tabela DynamoDB
+    Value: !GetAtt TriagemTable.Arn
