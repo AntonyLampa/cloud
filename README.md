@@ -118,3 +118,29 @@ A validação sintática inicial com `uvx cfn-lint vpc.yaml` passou sem erros e 
 **Não.** Um deploy bem-sucedido no Floci valida a estrutura do CloudFormation e o fluxo básico de criação de recursos, mas não garante prontidão para produção na AWS real. Entre as verificações que **apenas a AWS real executa**, destacam-se:
 1. **Existência real de AMIs e resolução efetiva de parâmetros SSM:** No Floci, o emulador aceitou `/aws/service/ami-amazon-linux-2023/x86_64/standard/latest` sem consultar um catálogo real de imagens, atribuindo o próprio caminho literal ao `ImageId`. Na AWS real, o CloudFormation resolve o parâmetro no SSM Parameter Store da região alvo e valida se a AMI existe, está disponível para a conta e é compatível com a arquitetura/tipo da instância (`t3.micro`).
 2. **Cotas de serviço (*Service Quotas*), permissões IAM granulares e disponibilidade por AZ:** A AWS real verifica limites da conta (como número máximo de VPCs ou Elastic IPs na região), avalia cada ação de criação (`ec2:RunInstances`, `s3:CreateBucket`, `iam:PassRole`) contra as políticas IAM do executor e verifica capacidade física de instâncias na Availability Zone selecionada — além de gerar custos reais desde o momento em que os recursos entram no ar.
+
+## Etapa 4 — Bedrock em Automação Orientada a Eventos
+
+### 1. Arquitetura Implementada
+Foi construído um pipeline serverless orientado a eventos para triagem automatizada de relatórios de inspeção agrícola:
+
+```text
+S3 (relatorios-campo / s3:ObjectCreated:*)
+   └──► AWS Lambda (triagem / app.py - Python 3.12, timeout 120s)
+           ├──► Amazon Bedrock Runtime (converse -> Ollama / llama3.2)
+           └──► Amazon DynamoDB (tabela triagem)
+
+### 2. Comandos para atualizar o `.gitignore` e enviar para o GitHub
+
+Adicione `*.zip` ao `.gitignore` (para não versionar o pacote binário `funcao.zip`, mantendo apenas o código-fonte `app.py`, as políticas e os relatórios de teste) e faça o `commit` e `push`:
+
+```powershell
+# Garante que arquivos .zip não subam para o repositório
+if (-not (Select-String -Path .gitignore -Pattern "\*\.zip" -Quiet)) {
+    Add-Content -Path .gitignore -Value "`n*.zip"
+}
+
+git status
+git add app.py notificacao.json triagem-lambda-policy.json relatorio1.txt relatorio2.txt relatorio3.txt README.md .gitignore
+git commit -m "Conclui Etapa 4: automacao orientada a eventos S3 -> Lambda -> Bedrock -> DynamoDB"
+git push
