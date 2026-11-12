@@ -149,3 +149,32 @@ S3 (relatorios-campo / s3:ObjectCreated:*)
 ### 3. Diferenças no Floci vs. AWS Real
 * **Injeção de Endpoint e Runtime:** O Floci executa a Lambda em um container Docker real e injeta automaticamente `AWS_ENDPOINT_URL`, permitindo que o `app.py` use `boto3.client("s3")` e `boto3.client("bedrock-runtime")` sem URLs fixas no código — idêntico ao código de produção na AWS.
 * **Timeout e Latência:** Como a inferência roda localmente em CPU/RAM via Ollama, foi necessário elevar o `--timeout` da Lambda de 3 s (padrão) para `120` s. Na AWS real, o mesmo `app.py` rodaria sem alterações de código, trocando apenas o `modelId` para um modelo gerenciado habilitado na conta e contabilizando o custo real por token processado.
+
+## Etapa 5 — Agentes e Automação Operacional
+
+### 1. Cenário e Arquitetura do Agente
+Foi implementado um agente operacional (`agente.py`) em Python utilizando a API `converse` do Bedrock (`toolConfig`) para diagnosticar incidentes de CPU alta no Auto Scaling Group `asg-campo` (`MinSize=1`, `MaxSize=4`, `DesiredCapacity=1`):
+
+* **Monitoramento e Alerta:** Alarme CloudWatch `cpu-alta-asg-campo` configurado para disparar quando `CPUUtilization > 80%`, enviando notificação via tópico SNS (`alarme-cpu-campo`) para a fila SQS assinante (`fila-alertas-campo`).
+* **Ferramentas Disponibilizadas ao Agente:**
+  * `ler_metricas` (`cloudwatch:GetMetricStatistics` — leitura)
+  * `descrever_asg` (`autoscaling:DescribeAutoScalingGroups` — leitura)
+  * `listar_atividades` (`autoscaling:DescribeScalingActivities` — leitura)
+  * `ajustar_capacidade` (`autoscaling:SetDesiredCapacity` — escrita, protegida por aprovação humana)
+* **Controles de Segurança Implementados:**
+  1. **Menor privilégio IAM:** Usuário dedicado `agente-ops` com política inline (`politica-agente-ops`) concedendo leitura apenas nas APIs de diagnóstico, invocação restrita ao modelo configurado e `autoscaling:SetDesiredCapacity` limitado exclusivamente ao ARN `arn:aws:autoscaling:us-east-1:000000000000:autoScalingGroup:asg-campo`.
+  2. **Aprovação humana (*Human-in-the-Loop*):** Confirmação explícita `[s/N]` no terminal antes de qualquer execução de `ajustar_capacidade`.
+  3. **Limite de iterações:** Laço limitado a `iteracao < 6` para prevenir loops infinitos.
+  4. **Trilha de auditoria:** Registro estruturado em JSON de cada ferramenta solicitada, aprovada/negada e resposta final no CloudWatch Logs (`/agente/operacoes-campo`).
+
+### 2. Análise Crítica da Execução no Floci (`llama3.2`)
+Durante o teste simulando pico de CPU (`30% -> 60% -> 95%`), a execução revelou duas falhas clássicas de modelos pequenos em modo agente, comprovando a necessidade das barreiras de segurança:
+1. **Tentativa de alteração fora de escala (`desired_capacity: 100`):** Na primeira iteração, o modelo invocou todas as ferramentas simultaneamente e tentou definir `desired_capacity: 100` antes de processar o retorno de `descrever_asg` (`MaxSize: 4`). A trava de aprovação humana (`N`) impediu o escalonamento indevido (`{'erro': 'acao negada pelo operador'}`).
+2. **Alucinação pós-negação:** Mesmo recebendo o retorno explícito de que a ação foi negada pelo operador, o modelo redigiu o diagnóstico afirmando que a capacidade havia sido alterada de 1 para 2 instâncias — reforçando que a validação do estado real da infraestrutura deve sempre vir das APIs AWS/CloudWatch Logs e não apenas do texto gerado pelo LLM.
+
+### 3. Resposta à Pergunta de Checagem
+> *"O agente recomendou dobrar a capacidade porque 'a CPU estava em 95%', mas foi um único ponto publicado por você. Que ferramenta ou instrução faltou para evitar essa decisão?"*
+
+Para evitar escalonamento precipitado baseado em um pico isolado (*spike*), faltaram dois elementos:
+1. **Instrução de sistema (*System Prompt*) com política de estabilidade:** Exigir que o agente verifique a **tendência sustentada** ao longo de múltiplos períodos consecutivos (ex.: média acima de 80% por pelo menos 3 a 5 minutos seguidos) e confira o cooldown/atividades recentes antes de propor qualquer alteração de capacidade, tratando picos únicos como anomalias transitórias a serem apenas monitoradas.
+2. **Ferramenta adicional de análise de histórico/logs da aplicação (`logs:FilterLogEvents` ou consulta de tráfego/requisições):** Permitir que o agente correlacione o pico de CPU com métricas de taxa de requisições (ALB/API) ou erros de aplicação (ex.: loop travado ou tarefa cron pontual), evitando escalar instâncias quando o gargalo não é aumento legítimo de carga.
